@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reconocimiento de rutas</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --tx:#1d2430; --mut:#5d6675; --bd:#dde1e7; --ac:#1f6feb;
+          --ok:#1a7f37; --err:#cf222e; --warn:#9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1c2027; --tx:#e4e7eb; --mut:#9aa3af; --bd:#2f353f; --ac:#4c8dff;
+            --ok:#3fb950; --err:#f85149; --warn:#d29922; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--tx); }
+  main { max-width:760px; margin:auto; padding:16px; }
+  h1 { font-size:1.4rem; margin:.4rem 0 1rem; }
+  section { background:var(--card); border:1px solid var(--bd); border-radius:10px; padding:16px; margin-bottom:16px; }
+  label { display:block; font-weight:600; margin:.7rem 0 .25rem; font-size:.92rem; }
+  small { color:var(--mut); font-weight:400; }
+  input, select { width:100%; padding:9px; border:1px solid var(--bd); border-radius:7px;
+                  background:var(--bg); color:var(--tx); font:inherit; }
+  button { margin-top:1rem; width:100%; padding:11px; border:0; border-radius:8px; background:var(--ac);
+           color:#fff; font:600 1rem system-ui; cursor:pointer; }
+  button:disabled { opacity:.6; }
+  .fila { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  @media (max-width:520px) { .fila { grid-template-columns:1fr; } }
+  #msg { margin-top:.7rem; font-size:.92rem; }
+  .vuelo { border-top:1px solid var(--bd); padding:10px 0; }
+  .vuelo:first-child { border-top:0; }
+  .top { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; }
+  .est { font-size:.82rem; font-weight:600; }
+  .listo { color:var(--ok); } .error { color:var(--err); } .pend { color:var(--warn); }
+  progress { width:100%; height:8px; }
+  a { color:var(--ac); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Reconocimiento de rutas con dron</h1>
+
+  <section>
+    <form id="f">
+      <label>Video del dron</label>
+      <input type="file" name="video" accept="video/*" required>
+      <label>Telemetría <small>(CSV o JSON: timestamp_ms, lat, lon, alt_m, tramo_id)</small></label>
+      <input type="file" name="telemetria" accept=".csv,.json" required>
+      <div class="fila">
+        <div>
+          <label>Tipo de ruta</label>
+          <select name="tipo_ruta">
+            <option value="general">General</option>
+            <option value="a_pie">A pie</option>
+            <option value="vehiculo">En vehículo</option>
+          </select>
+        </div>
+        <div>
+          <label>Nombre <small>(opcional)</small></label>
+          <input name="nombre" placeholder="Ruta al mirador">
+        </div>
+      </div>
+      <div class="fila">
+        <div>
+          <label>Inicio del video <small>(epoch ms, opcional)</small></label>
+          <input name="video_start_epoch_ms" inputmode="numeric" placeholder="1760000000000">
+        </div>
+        <div>
+          <label>Offset <small>(ms)</small></label>
+          <input name="offset_ms" inputmode="numeric" value="0">
+        </div>
+      </div>
+      <label>Token <small>(solo si el servidor tiene API_TOKEN)</small></label>
+      <input id="token" type="password" autocomplete="off">
+      <button id="btn">Enviar vuelo</button>
+      <progress id="subida" max="1" value="0" hidden></progress>
+      <div id="msg"></div>
+    </form>
+  </section>
+
+  <section>
+    <div class="top"><strong>Vuelos recibidos</strong><a href="#" id="recargar">actualizar</a></div>
+    <div id="lista"><small>Cargando…</small></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const tokenInput = $('#token');
+try { tokenInput.value = localStorage.getItem('token') || ''; } catch (e) {}
+const tok = () => tokenInput.value.trim();
+const hdr = () => tok() ? { 'X-API-Key': tok() } : {};
+const q = () => tok() ? '?token=' + encodeURIComponent(tok()) : '';
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+$('#f').addEventListener('submit', ev => {
+  ev.preventDefault();
+  try { localStorage.setItem('token', tok()); } catch (e) {}
+  const fd = new FormData(ev.target);
+  for (const k of ['video_start_epoch_ms', 'nombre']) if (!fd.get(k)) fd.delete(k);
+  const xhr = new XMLHttpRequest();
+  const bar = $('#subida');
+  xhr.open('POST', '/api/vuelos');
+  Object.entries(hdr()).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+  xhr.upload.onprogress = e => { if (e.lengthComputable) bar.value = e.loaded / e.total; };
+  xhr.onload = () => {
+    $('#btn').disabled = false; bar.hidden = true;
+    let r = {}; try { r = JSON.parse(xhr.responseText); } catch (e) {}
+    $('#msg').innerHTML = xhr.status === 202
+      ? `<span class="listo">Recibido: ${esc(r.id)}. Procesando…</span>`
+      : `<span class="error">Error ${xhr.status}: ${esc(r.detail || xhr.responseText)}</span>`;
+    cargar();
+  };
+  xhr.onerror = () => { $('#btn').disabled = false; $('#msg').innerHTML = '<span class="error">Error de red</span>'; };
+  $('#btn').disabled = true; bar.hidden = false; bar.value = 0; $('#msg').textContent = 'Subiendo…';
+  xhr.send(fd);
+});
+
+const ETQ = { en_cola:'En cola', procesando_video:'Analizando video', generando_informe:'Redactando informe',
+              listo:'Listo', error:'Error' };
+async function cargar() {
+  try {
+    const r = await fetch('/api/vuelos', { headers: hdr() });
+    if (!r.ok) { $('#lista').innerHTML = `<small class="error">No autorizado o error (${r.status})</small>`; return; }
+    const vs = await r.json();
+    $('#lista').innerHTML = vs.length ? vs.map(v => {
+      const cls = v.estado === 'listo' ? 'listo' : v.estado === 'error' ? 'error' : 'pend';
+      const link = v.estado === 'listo' ? `<a href="/vuelos/${v.id}${q()}">ver informe</a>` : '';
+      const barra = cls === 'pend' ? `<progress max="1" value="${v.progreso || 0}"></progress>` : '';
+      return `<div class="vuelo"><div class="top"><span>${esc(v.nombre || v.id)} · <small>${esc(v.tipo_ruta)}</small></span>
+        <span class="est ${cls}">${ETQ[v.estado] || esc(v.estado)}</span></div>
+        <small>${esc(v.mensaje)}</small> ${link}${barra}</div>`;
+    }).join('') : '<small>Aún no hay vuelos.</small>';
+    if (vs.some(v => !['listo', 'error'].includes(v.estado))) setTimeout(cargar, 3000);
+  } catch (e) { $('#lista').innerHTML = '<small class="error">Sin conexión con el servidor</small>'; }
+}
+$('#recargar').onclick = e => { e.preventDefault(); cargar(); };
+cargar();
+</script>
+</body>
+</html>

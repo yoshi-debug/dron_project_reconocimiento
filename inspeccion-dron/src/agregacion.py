@@ -24,13 +24,18 @@ def resumir_por_tramo(df):
              "total_obstaculos": int(g.n_obstaculos.sum()),
              "max_obstaculos_por_frame": int(g.n_obstaculos.max()),
              "frames_aglomeracion": int(g.aglomeracion.sum()),
+             "total_vehiculos": int(g.n_vehiculos.sum()) if "n_vehiculos" in g else 0,
              "pct_terreno": (g.terreno.value_counts(normalize=True) * 100).round(1).to_dict(),
              "metodo_terreno": g.terreno_metodo.mode()[0]}
-        c = g[(g.n_obstaculos > 0) | g.aglomeracion].copy()
-        c["puntaje"] = c.aglomeracion.astype(int) * 100 + c.n_obstaculos
+        g = g.copy()
+        if "n_vehiculos" not in g:
+            g["n_vehiculos"] = 0
+        g["puntaje"] = g.aglomeracion.astype(int) * 100 + g.n_obstaculos * 10 + g.n_vehiculos
+        c = g[(g.n_obstaculos > 0) | g.aglomeracion | (g.n_vehiculos > 0)]
         t["hallazgos"] = [{"t_video_s": float(f.t_video_s), "lat": float(f.lat),
                            "lon": float(f.lon), "n_obstaculos": int(f.n_obstaculos),
                            "n_personas": int(f.n_personas),
+                           "n_vehiculos": int(f.n_vehiculos),
                            "imagen": "" if f.imagen != f.imagen else f.imagen}
                           for f in c.sort_values("puntaje", ascending=False).head(5).itertuples()]
         t["nivel_riesgo"] = nivel_riesgo(t)

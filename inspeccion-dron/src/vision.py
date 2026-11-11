@@ -47,12 +47,14 @@ class Analizador:
 
         n_obst = sum(n for c, n in conteo.items() if c in config.CLASES_OBSTACULO)
         n_pers = sum(n for c, n in conteo.items() if c in config.CLASES_PERSONA)
+        n_veh = sum(n for c, n in conteo.items() if c in config.CLASES_VEHICULO)
         terreno, t_conf, metodo = self._terreno(frame)
-        hay_algo = (n_obst + n_pers) > 0
+        hay_algo = (n_obst + n_pers + n_veh) > 0
         return {
             "conteo": dict(conteo),
             "n_obstaculos": n_obst,
             "n_personas": n_pers,
+            "n_vehiculos": n_veh,
             "aglomeracion": n_pers >= config.UMBRAL_AGLOMERACION,   # regla de negocio
             "conf_max": conf_max,
             "terreno": terreno, "terreno_conf": t_conf, "terreno_metodo": metodo,

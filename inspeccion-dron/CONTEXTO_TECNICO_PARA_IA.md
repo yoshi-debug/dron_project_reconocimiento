@@ -264,3 +264,11 @@ Al trabajar en este proyecto:
 ## 11. Alcance y método de esta auditoría
 
 Se revisaron los scripts principales, todos los módulos de `src/`, la configuración, dependencias, ejemplo de entorno, generadores, metadatos y resultados de muestra. También se inspeccionó la estructura excluyendo internamente el contenido masivo de `venv/`, el tamaño/tipo de los artefactos binarios, los imports resueltos por Pylance y el entorno virtual instalado. Pylance no reportó diagnósticos de workspace. No se inspeccionaron secretos, no se cargó el checkpoint para ejecutar pickle, no se ejecutó inferencia de nuevo y no se llamaron APIs externas. En consecuencia, los resultados y versiones se describen según artefactos existentes y metadatos locales, no como una validación de precisión del modelo en terreno.
+
+## 12. Actualización 2026-11-11: servidor para el celular
+
+- La lógica de las dos etapas vive ahora en `src/pipeline.py` (`procesar_video`, `generar_reporte`); los scripts `01_`/`02_` son envoltorios CLI.
+- `servidor/app.py` (FastAPI) recibe `(video, telemetría)` desde el celular, encola el trabajo (`servidor/trabajos.py`, un hilo, estado en `salida/vuelos/<id>/estado.json`) y sirve el informe en Markdown/HTML. Contrato en `API_CELULAR.md`.
+- Nuevo parámetro `tipo_ruta` (`a_pie`, `vehiculo`, `general`) que orienta los prompts del informe.
+- Se cuentan vehículos COCO (`CLASES_VEHICULO`); columna nueva `n_vehiculos` y campo `total_vehiculos` por tramo. No cambian las reglas de riesgo.
+- Si el LLM no está disponible (sin clave, proveedor inválido o fallo tras reintentos), `src/reporte.informe_determinista` genera un informe con plantillas y el encabezado lo indica.
