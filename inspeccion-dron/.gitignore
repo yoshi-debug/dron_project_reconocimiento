@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 salida/
 data/entrada/*.mp4
+data/demo/*.mp4
