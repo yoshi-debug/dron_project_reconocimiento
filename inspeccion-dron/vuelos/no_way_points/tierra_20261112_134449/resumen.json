@@ -1,0 +1,15 @@
+{
+  "flight_id": "tierra_20261112_134449",
+  "drone_model": "MAVIC_AIR",
+  "started_at_ms": 1794509105822,
+  "last_seen_ms": 1794509191674,
+  "samples": 123,
+  "events": 5,
+  "ended": false,
+  "videos": [
+    "video.mp4",
+    "video_2.mp4"
+  ],
+  "mp4_version": 3,
+  "errors": []
+}

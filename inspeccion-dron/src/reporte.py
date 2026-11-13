@@ -38,10 +38,14 @@ def llamar_gemini(sistema, usuario):
     from google import genai
     from google.genai import types
     cliente = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    r = cliente.models.generate_content(
-        model=config.MODELO_GEMINI, contents=usuario,
-        config=types.GenerateContentConfig(system_instruction=sistema,
-                                           temperature=0.2, max_output_tokens=1500))
+    opciones = dict(system_instruction=sistema, temperature=0.2, max_output_tokens=4096)
+    if "2.5-flash" in config.MODELO_GEMINI:      # sin "razonamiento": gasta tokens y corta la respuesta
+        opciones["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    r = cliente.models.generate_content(model=config.MODELO_GEMINI, contents=usuario,
+                                        config=types.GenerateContentConfig(**opciones))
+    fin = str(r.candidates[0].finish_reason) if r.candidates else ""
+    if "MAX_TOKENS" in fin:
+        raise ValueError("respuesta truncada por límite de tokens")
     return r.text
 
 
@@ -49,9 +53,11 @@ def llamar_groq(sistema, usuario):
     from groq import Groq
     cliente = Groq(api_key=os.environ["GROQ_API_KEY"])
     r = cliente.chat.completions.create(
-        model=config.MODELO_GROQ, temperature=0.2, max_tokens=1500,
+        model=config.MODELO_GROQ, temperature=0.2, max_tokens=2048,
         messages=[{"role": "system", "content": sistema},
                   {"role": "user", "content": usuario}])
+    if r.choices[0].finish_reason == "length":
+        raise ValueError("respuesta truncada por límite de tokens")
     return r.choices[0].message.content
 
 
@@ -94,11 +100,20 @@ def redactar_tramo(tramo, tipo_ruta="general"):
                    "Datos del tramo:\n" + json.dumps(tramo, ensure_ascii=False, indent=2))
 
 
-def redactar_resumen(textos, tipo_ruta="general"):
-    return _llamar(SYSTEM_RESUMEN.format(tipo_ruta=tipo_ruta), "\n\n".join(textos))
+def redactar_resumen(textos, tipo_ruta="general", contexto=""):
+    cuerpo = "\n\n".join(textos)
+    if contexto:
+        cuerpo = "Datos generales del vuelo:\n" + contexto + "\n\nInformes por tramo:\n" + cuerpo
+    return _llamar(SYSTEM_RESUMEN.format(tipo_ruta=tipo_ruta), cuerpo)
 
 
 # ---------------------------------------------------------------- respaldo sin LLM
+def _pos(d):
+    if d.get("lat") is None or d.get("lon") is None:
+        return "(posición sin dato)"
+    return f"({d['lat']:.6f}, {d['lon']:.6f})"
+
+
 def informe_determinista(tramos, tipo_ruta):
     """Informe con plantillas fijas: se usa cuando el LLM no está disponible."""
     orden = {"alto": 0, "medio": 1, "bajo": 2}
@@ -108,15 +123,15 @@ def informe_determinista(tramos, tipo_ruta):
         if t["metodo_terreno"] == "heuristico":
             terreno += " (estimación por color)"
         hall = "\n".join(
-            f"- t={h['t_video_s']:.0f} s en ({h['lat']:.6f}, {h['lon']:.6f}): "
+            f"- t={h['t_video_s']:.0f} s en {_pos(h)}: "
             f"{h['n_obstaculos']} obstáculos, {h['n_personas']} personas, "
             f"{h.get('n_vehiculos', 0)} vehículos"
             for h in t["hallazgos"]) or "- Sin hallazgos puntuales."
         textos.append(
             f"## Tramo {t['tramo_id']} - Riesgo: {t['nivel_riesgo']}\n"
             f"**Resumen:** {t['n_fotogramas']} fotogramas entre "
-            f"({t['inicio']['lat']:.6f}, {t['inicio']['lon']:.6f}) y "
-            f"({t['fin']['lat']:.6f}, {t['fin']['lon']:.6f}); "
+            f"{_pos(t['inicio'])} y {_pos(t['fin'])}"
+            f"{' (sin GPS en ' + str(t['pct_sin_gps']) + '% de los fotogramas)' if t.get('pct_sin_gps') else ''}; "
             f"{t['total_obstaculos']} obstáculos, {t.get('total_vehiculos', 0)} vehículos y "
             f"{t['frames_aglomeracion']} fotogramas con aglomeración.\n\n"
             f"**Hallazgos:**\n{hall}\n\n**Terreno:** {terreno}\n\n"

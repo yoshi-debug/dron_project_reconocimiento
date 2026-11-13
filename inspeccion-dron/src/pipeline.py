@@ -43,60 +43,77 @@ def instante_inicio_video(meta, inicio_ms, linea):
     return linea.inicio_ms, "supuesto: primera muestra de telemetría"
 
 
-def procesar_video(video, telemetria, dir_salida, meta=None, inicio_ms=None, offset_ms=0,
-                   analizador=None, progreso=_nada, nombre_video=None):
-    """Etapa 1. `progreso(fraccion_0_1, mensaje)` se llama periódicamente."""
+def _r(x, n):
+    return None if x is None else round(x, n)
+
+
+def procesar_segmentos(segmentos, muestras, dir_salida, ventana=None, analizador=None,
+                       progreso=_nada, extra_info=None):
+    """Etapa 1 general. `segmentos`: lista de {"ruta", "inicio_ms", "nombre", "origen_inicio"}.
+    Cada video se sincroniza con su propio inicio. Si hay `ventana=(desde_ms, hasta_ms)` solo se
+    analizan los fotogramas dentro de ella (p. ej. solo mientras el dron está en el aire)."""
     from src.vision import Analizador          # import tardío: carga torch/ultralytics
 
-    video, dir_salida = Path(video), Path(dir_salida)
+    dir_salida = Path(dir_salida)
     (dir_salida / "frames").mkdir(parents=True, exist_ok=True)
-
-    linea = LineaTemporal(cargar_telemetria(telemetria))
-    inicio, origen_inicio = instante_inicio_video(meta, inicio_ms, linea)
-    fps, total, duracion = info_video(video)
-    if total <= 0:
-        raise ValueError("El video no tiene fotogramas legibles.")
-    print(f"Video: {fps:.1f} fps, {total} frames, {duracion:.1f} s | inicio por: {origen_inicio}")
-
+    linea = LineaTemporal(muestras)
     analizador = analizador or Analizador()
-    esperados = max(1, int(duracion * config.FPS_MUESTREO))
+
+    infos, esperados = [], 0
+    for s in segmentos:
+        fps, total, dur = info_video(s["ruta"])
+        if total <= 0:
+            raise ValueError(f"El video {s['nombre']} no tiene fotogramas legibles.")
+        ini, fin = s["inicio_ms"], s["inicio_ms"] + dur * 1000
+        if ventana:
+            ini, fin = max(ini, ventana[0]), min(fin, ventana[1])
+        esperados += max(0, int((fin - ini) / 1000 * config.FPS_MUESTREO))
+        infos.append({"video": s["nombre"], "fps": fps, "duracion_s": round(dur, 2),
+                      "inicio_ms": s["inicio_ms"], "origen_inicio": s.get("origen_inicio", "")})
+        print(f"Video {s['nombre']}: {fps:.1f} fps, {dur:.1f} s | inicio por: {s.get('origen_inicio')}")
+    esperados = max(esperados, 1)
+
     filas = []
-    for idx, t_s, frame in extraer_frames(video, config.FPS_MUESTREO):
-        ts_ms = inicio + int(t_s * 1000) + offset_ms          # ← LA FUSIÓN POR TIMESTAMP
-        tel = linea.en(ts_ms)
-        res = analizador.analizar(frame)
-
-        ruta_img = ""
-        if res["anotado"] is not None:
-            ruta_img = f"frames/f{idx:06d}.jpg"
-            cv2.imwrite(str(dir_salida / ruta_img), res["anotado"])
-
-        filas.append({
-            "frame_idx": idx, "t_video_s": round(t_s, 2), "ts_ms": ts_ms,
-            "lat": round(tel["lat"], 7), "lon": round(tel["lon"], 7),
-            "alt_m": round(tel["alt_m"], 2), "tramo_id": tel["tramo_id"],
-            "telemetria_fuera_de_rango": tel["fuera_de_rango"], "brecha_ms": tel["brecha_ms"],
-            "n_obstaculos": res["n_obstaculos"], "n_personas": res["n_personas"],
-            "n_vehiculos": res["n_vehiculos"],
-            "aglomeracion": res["aglomeracion"], "conf_max": round(res["conf_max"], 3),
-            "conteo": json.dumps(res["conteo"], ensure_ascii=False),
-            "terreno": res["terreno"], "terreno_conf": round(res["terreno_conf"], 3),
-            "terreno_metodo": res["terreno_metodo"], "imagen": ruta_img,
-        })
-        if len(filas) % 10 == 0:
-            progreso(min(len(filas) / esperados, 0.99), f"{len(filas)} fotogramas analizados")
+    for s in segmentos:
+        pref = Path(s["nombre"]).stem
+        for idx, t_s, frame in extraer_frames(s["ruta"], config.FPS_MUESTREO):
+            ts_ms = s["inicio_ms"] + int(t_s * 1000)         # ← LA FUSIÓN POR TIMESTAMP
+            if ventana and not (ventana[0] <= ts_ms <= ventana[1]):
+                continue
+            tel = linea.en(ts_ms)
+            res = analizador.analizar(frame)
+            ruta_img = ""
+            if res["anotado"] is not None:
+                ruta_img = f"frames/{pref}_f{idx:06d}.jpg"
+                cv2.imwrite(str(dir_salida / ruta_img), res["anotado"])
+            filas.append({
+                "video": s["nombre"], "frame_idx": idx, "t_video_s": round(t_s, 2), "ts_ms": ts_ms,
+                "t_vuelo_s": round((ts_ms - ventana[0]) / 1000, 1) if ventana else round(t_s, 1),
+                "lat": _r(tel["lat"], 7), "lon": _r(tel["lon"], 7),
+                "alt_m": _r(tel["alt_m"], 2), "tramo_id": tel["tramo_id"],
+                "telemetria_fuera_de_rango": tel["fuera_de_rango"], "brecha_ms": tel["brecha_ms"],
+                "sin_gps": tel["sin_gps"],
+                "n_obstaculos": res["n_obstaculos"], "n_personas": res["n_personas"],
+                "n_vehiculos": res["n_vehiculos"],
+                "aglomeracion": res["aglomeracion"], "conf_max": round(res["conf_max"], 3),
+                "conteo": json.dumps(res["conteo"], ensure_ascii=False),
+                "terreno": res["terreno"], "terreno_conf": round(res["terreno_conf"], 3),
+                "terreno_metodo": res["terreno_metodo"], "imagen": ruta_img,
+            })
+            if len(filas) % 10 == 0:
+                progreso(min(len(filas) / esperados, 0.99), f"{len(filas)} fotogramas analizados")
 
     if not filas:
-        raise ValueError("No se pudo decodificar ningún fotograma del video.")
+        raise ValueError("Ningún fotograma del video cae dentro del vuelo (revisa la sincronía).")
 
     df = pd.DataFrame(filas)
     df.to_csv(dir_salida / "resultados_frames.csv", index=False, encoding="utf-8")
     fuera = int(df["telemetria_fuera_de_rango"].sum())
-    info = {"video": nombre_video or video.name, "fps": fps, "duracion_s": duracion,
-            "origen_inicio_video": origen_inicio, "offset_ms": offset_ms,
+    info = {"video": ", ".join(i["video"] for i in infos), "videos": infos,
             "fotogramas_analizados": len(df), "fotogramas_fuera_de_telemetria": fuera,
+            "fotogramas_sin_gps": int(df["sin_gps"].sum()),
             "detector_propio": analizador.detector_propio,
-            "clasificador_propio": analizador.clasificador is not None}
+            "clasificador_propio": analizador.clasificador is not None, **(extra_info or {})}
     (dir_salida / "info_corrida.json").write_text(
         json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
     if fuera:
@@ -105,8 +122,22 @@ def procesar_video(video, telemetria, dir_salida, meta=None, inicio_ms=None, off
     return info
 
 
-def generar_reporte(dir_salida, tipo_ruta="general", usar_llm=True, progreso=_nada):
-    """Etapa 2. Si el LLM falla o no hay clave, escribe un informe determinista (sin IA generativa)."""
+def procesar_video(video, telemetria, dir_salida, meta=None, inicio_ms=None, offset_ms=0,
+                   analizador=None, progreso=_nada, nombre_video=None):
+    """Etapa 1 para un solo video + telemetría (formato simple)."""
+    video = Path(video)
+    muestras = cargar_telemetria(telemetria)
+    inicio, origen = instante_inicio_video(meta, inicio_ms, LineaTemporal(muestras))
+    seg = {"ruta": video, "inicio_ms": inicio + offset_ms, "nombre": nombre_video or video.name,
+           "origen_inicio": origen}
+    return procesar_segmentos([seg], muestras, dir_salida, analizador=analizador, progreso=progreso,
+                              extra_info={"offset_ms": offset_ms, "origen_inicio_video": origen})
+
+
+def generar_reporte(dir_salida, tipo_ruta="general", usar_llm=True, progreso=_nada,
+                    titulo=None, seccion_vuelo=""):
+    """Etapa 2. Si el LLM falla o no hay clave, escribe un informe determinista (sin IA generativa).
+    `seccion_vuelo`: Markdown con datos del vuelo (eventos, batería...) que se añade al informe."""
     dir_salida = Path(dir_salida)
     df = pd.read_csv(dir_salida / "resultados_frames.csv")
     tramos = resumir_por_tramo(df)
@@ -128,20 +159,24 @@ def generar_reporte(dir_salida, tipo_ruta="general", usar_llm=True, progreso=_na
             if n < len(tramos):
                 time.sleep(config.PAUSA_ENTRE_LLAMADAS_S)
         progreso(len(tramos) / (len(tramos) + 1), "Redactando resumen ejecutivo")
-        resumen = redactar_resumen(textos, desc_ruta)
+        resumen = redactar_resumen(textos, desc_ruta, contexto=seccion_vuelo)
     except ErrorLLM as e:
         metodo, aviso = "determinista", str(e)
         print(f"AVISO: informe sin LLM ({e}).")
         resumen, textos = informe_determinista(tramos, desc_ruta)
 
-    cabecera = (f"# Informe de reconocimiento de ruta con dron\n\n- Fecha: {date.today()}\n"
+    cabecera = (f"# {titulo or 'Informe de reconocimiento de ruta con dron'}\n\n"
+                f"- Fecha del informe: {date.today()}\n"
                 f"- Tipo de ruta evaluada: {desc_ruta}\n"
                 f"- Video: {info.get('video', 'sin dato')}\n"
                 f"- Fotogramas analizados: {len(df)}\n- Tramos: {len(tramos)}")
     if metodo == "determinista":
         cabecera += ("\n\n> Nota: este informe se generó con reglas automáticas, sin redacción por IA "
                      f"generativa ({aviso}).")
-    md = "\n\n".join([cabecera, "## Resumen ejecutivo", resumen] + textos)
+    partes = [cabecera, "## Resumen ejecutivo", resumen]
+    if seccion_vuelo:
+        partes.append(seccion_vuelo)
+    md = "\n\n".join(partes + textos)
     (dir_salida / "reporte.md").write_text(md, encoding="utf-8")
     progreso(1.0, "Informe listo")
     return {"metodo_informe": metodo, "aviso_informe": aviso,

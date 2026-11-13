@@ -4,6 +4,18 @@ Video + telemetría del dron → detección con YOLO + cruce con la posición GP
 para decidir si una ruta es recomendable a pie o en vehículo. El celular conectado al dron envía los
 datos a un servidor HTTP (contrato en [API_CELULAR.md](API_CELULAR.md)).
 
+## Misiones grabadas por la app (formato principal)
+
+La app guarda cada misión en `vuelos/<mision>/` con carpetas `tierra_*` y `vuelo_*`
+(`resumen.json`, `telemetria.csv`, `video*.mp4`). Formato detallado en [API_CELULAR.md](API_CELULAR.md).
+
+```bash
+venv/bin/python 03_procesar_mision.py --mision vuelos/no_way_points
+```
+Genera un informe por vuelo en `salida/vuelos/<mision>__<vuelo>/reporte.md`. Con el servidor levantado
+también se ven en `http://localhost:8000/`, y el celular puede enviar las sesiones a
+`POST /api/misiones/<mision>/sesiones` para que se procesen solas.
+
 ## Demo con datos sintéticos
 
 Desde `inspeccion-dron/`:

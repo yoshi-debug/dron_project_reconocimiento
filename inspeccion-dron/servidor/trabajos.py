@@ -5,6 +5,7 @@ Un solo hilo procesa los vuelos de uno en uno (YOLO en CPU no se beneficia de pa
 """
 import json
 import queue
+import shutil
 import threading
 import traceback
 import uuid
@@ -12,7 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config
-from src.pipeline import generar_reporte, procesar_video
+from src.mision import cargar_mision, preparar_vuelo, seccion_markdown
+from src.pipeline import generar_reporte, procesar_segmentos, procesar_video
 
 ESTADOS_PENDIENTES = {"en_cola", "procesando_video", "generando_informe"}
 _lock = threading.Lock()
@@ -87,10 +89,33 @@ def _procesar(vuelo_id: str):
         def prog_video(f, m):     # la etapa 1 ocupa el 0-80 % de la barra
             actualizar(vuelo_id, progreso=round(0.8 * f, 3), mensaje=m)
 
-        info = procesar_video(d / p["archivo_video"], d / p["archivo_telemetria"], d,
-                              meta=p.get("meta"), inicio_ms=p.get("video_start_epoch_ms"),
-                              offset_ms=p.get("offset_ms", 0), analizador=_analizador,
-                              progreso=prog_video, nombre_video=p.get("video_original"))
+        extra = {}
+        previo = d / "info_corrida.json"
+        if p.get("solo_informe") and (d / "resultados_frames.csv").exists() and previo.exists():
+            info = json.loads(previo.read_text(encoding="utf-8"))   # reusa el análisis de video
+            if info.get("datos_vuelo"):
+                extra = {"titulo": f"Informe del vuelo {p['vuelo']} (misión {p['mision']})",
+                         "seccion_vuelo": seccion_markdown(info["datos_vuelo"])}
+            est_prev = leer_estado(vuelo_id) or {}
+            if est_prev.get("videos_procesados"):
+                actualizar(vuelo_id, videos_procesados=est_prev["videos_procesados"])
+        elif p.get("tipo") == "mision":
+            shutil.rmtree(d / "frames", ignore_errors=True)     # imágenes de una corrida anterior
+            prep = preparar_vuelo(cargar_mision(config.DIR_MISIONES / p["mision"]), p["vuelo"])
+            if not prep["videos"]:
+                raise ValueError("Ningún video de la misión cubre este vuelo.")
+            info = procesar_segmentos(prep["videos"], prep["muestras"], d, ventana=prep["ventana"],
+                                      analizador=_analizador, progreso=prog_video,
+                                      extra_info={"datos_vuelo": prep["datos"]})
+            extra = {"titulo": f"Informe del vuelo {p['vuelo']} (misión {p['mision']})",
+                     "seccion_vuelo": seccion_markdown(prep["datos"])}
+            actualizar(vuelo_id, videos_procesados=[v["nombre"] for v in prep["videos"]])
+        else:
+            shutil.rmtree(d / "frames", ignore_errors=True)
+            info = procesar_video(d / p["archivo_video"], d / p["archivo_telemetria"], d,
+                                  meta=p.get("meta"), inicio_ms=p.get("video_start_epoch_ms"),
+                                  offset_ms=p.get("offset_ms", 0), analizador=_analizador,
+                                  progreso=prog_video, nombre_video=p.get("video_original"))
 
         actualizar(vuelo_id, estado="generando_informe", progreso=0.8,
                    mensaje="Redactando informe", info_corrida=info)
@@ -98,7 +123,8 @@ def _procesar(vuelo_id: str):
         def prog_inf(f, m):
             actualizar(vuelo_id, progreso=round(0.8 + 0.2 * f, 3), mensaje=m)
 
-        r = generar_reporte(d, p.get("tipo_ruta", "general"), progreso=prog_inf)
+        r = generar_reporte(d, p.get("tipo_ruta", "general"), usar_llm=p.get("usar_llm", True),
+                            progreso=prog_inf, **extra)
         actualizar(vuelo_id, estado="listo", progreso=1.0, mensaje="Informe listo", **r)
     except Exception as e:
         traceback.print_exc()
@@ -130,3 +156,44 @@ def posicion_en_cola(vuelo_id: str) -> int | None:
     with _cola.mutex:
         pendientes = list(_cola.queue)
     return pendientes.index(vuelo_id) + 1 if vuelo_id in pendientes else None
+
+
+# ------------------------------------------------------------------ misiones (carpetas de la app)
+def id_mision(mision: str, vuelo: str) -> str:
+    return f"{mision}__{vuelo}"
+
+
+def vuelos_listos(mision: str) -> list[tuple[str, list[str]]]:
+    """Vuelos de la misión que ya tienen video que los cubra: [(vuelo_id, [videos])]."""
+    sesiones = cargar_mision(config.DIR_MISIONES / mision)
+    out = []
+    for s in sesiones:
+        if s["es_vuelo"]:
+            vids = preparar_vuelo(sesiones, s["id"])["videos"]
+            if vids:
+                out.append((s["id"], [v["nombre"] for v in vids]))
+    return out
+
+
+def encolar_mision(mision: str, tipo_ruta="general", forzar=False, usar_llm=True) -> list[str]:
+    """Encola los vuelos nuevos o cuyos videos cambiaron (p. ej. llegó un video más tarde)."""
+    encolados = []
+    for vuelo, videos in vuelos_listos(mision):
+        jid = id_mision(mision, vuelo)
+        dir_vuelo(jid).mkdir(parents=True, exist_ok=True)
+        est = leer_estado(jid) or {}
+        if est.get("estado") in ESTADOS_PENDIENTES:
+            continue
+        if not forzar and est.get("estado") == "listo" and est.get("videos_procesados") == videos:
+            continue
+        crear(jid, {"tipo": "mision", "mision": mision, "vuelo": vuelo, "tipo_ruta": tipo_ruta,
+                    "usar_llm": usar_llm, "nombre": f"{mision} / {vuelo}"})
+        encolados.append(jid)
+    return encolados
+
+
+def procesar_ahora(jid: str):
+    """Procesa un trabajo ya creado en este mismo hilo (lo usa la línea de comandos)."""
+    _cola.queue.remove(jid) if jid in _cola.queue else None
+    _procesar(jid)
+    return leer_estado(jid)

@@ -5,3 +5,4 @@ __pycache__/
 salida/
 data/entrada/*.mp4
 data/demo/*.mp4
+vuelos/**/*.mp4

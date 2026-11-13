@@ -40,3 +40,11 @@ PAUSA_ENTRE_LLAMADAS_S = 5    # respeta los límites por minuto del plan gratuit
 DIR_VUELOS = DIR_SALIDA / "vuelos"           # cada envío del celular queda en salida/vuelos/<id>/
 API_TOKEN = os.getenv("API_TOKEN", "")       # si se define, el celular debe mandar X-API-Key
 MAX_SUBIDA_MB = int(os.getenv("MAX_SUBIDA_MB", "2048"))
+
+# ---------- Telemetría sin waypoints ----------
+TRAMO_MAX_S = 30              # se abre un tramo nuevo cada 30 s de vuelo...
+TRAMO_MAX_M = 25              # ...o cada 25 m recorridos (lo que ocurra primero)
+GPS_MAX_BRECHA_MS = 5000      # si no hay GPS a menos de 5 s del fotograma, la posición es "sin dato"
+
+# ---------- Misiones enviadas por la app (carpetas tierra_*/vuelo_*) ----------
+DIR_MISIONES = RAIZ / "vuelos"               # vuelos/<mision>/<sesion>/{resumen.json,telemetria.csv,video*.mp4}

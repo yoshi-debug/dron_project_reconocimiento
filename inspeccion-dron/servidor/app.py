@@ -7,6 +7,8 @@ Contrato completo de la API en API_CELULAR.md
 import html
 import json
 import shutil
+import tempfile
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,7 +19,8 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 import config
 from servidor import trabajos
 from src.pipeline import TIPOS_RUTA
-from src.telemetria import cargar_telemetria
+from src.mision import NOMBRE_VALIDO
+from src.telemetria import cargar_telemetria, leer_filas
 
 EXT_VIDEO = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".3gp"}
 EXT_TELEMETRIA = {".csv", ".json"}
@@ -186,6 +189,139 @@ def frame(vuelo_id: str, nombre: str):
     if ruta.parent != carpeta or not ruta.exists():
         raise HTTPException(404, "Imagen no encontrada")
     return FileResponse(ruta)
+
+
+# ------------------------------------------------------------------ misiones (formato de la app)
+EXT_SESION = {".json", ".csv"} | EXT_VIDEO
+
+
+def _dir_mision(mision: str) -> Path:
+    if not NOMBRE_VALIDO.match(mision):
+        raise HTTPException(422, "Nombre de misión inválido (usa letras, números, _ - .)")
+    return config.DIR_MISIONES / mision
+
+
+def _tipo_ruta_mision(d: Path, tipo_ruta: str | None) -> str:
+    ruta = d / "mision.json"
+    datos = json.loads(ruta.read_text(encoding="utf-8")) if ruta.exists() else {}
+    if tipo_ruta:
+        if tipo_ruta not in TIPOS_RUTA:
+            raise HTTPException(422, f"tipo_ruta debe ser uno de {sorted(TIPOS_RUTA)}")
+        datos["tipo_ruta"] = tipo_ruta
+        d.mkdir(parents=True, exist_ok=True)
+        ruta.write_text(json.dumps(datos), encoding="utf-8")
+    return datos.get("tipo_ruta", "general")
+
+
+def _guardar_sesion(d_mision: Path, archivos: dict[str, bytes | UploadFile]) -> str:
+    """archivos: nombre -> contenido. Debe incluir resumen.json; la carpeta es su flight_id."""
+    if "resumen.json" not in archivos:
+        raise HTTPException(422, "Cada sesión debe incluir resumen.json")
+    bruto = archivos["resumen.json"]
+    bruto = bruto if isinstance(bruto, bytes) else bruto.file.read()
+    try:
+        resumen = json.loads(bruto.decode("utf-8"))
+        sesion = resumen["flight_id"]
+    except Exception:
+        raise HTTPException(422, "resumen.json inválido o sin flight_id")
+    if not NOMBRE_VALIDO.match(sesion):
+        raise HTTPException(422, f"flight_id inválido: {sesion!r}")
+    d = d_mision / sesion
+    d.mkdir(parents=True, exist_ok=True)
+    for nombre, contenido in archivos.items():
+        if nombre == "resumen.json":
+            continue
+        if not NOMBRE_VALIDO.match(nombre) or Path(nombre).suffix.lower() not in EXT_SESION:
+            raise HTTPException(422, f"Archivo no permitido: {nombre!r}")
+        if isinstance(contenido, bytes):
+            (d / nombre).write_bytes(contenido)
+        else:
+            _guardar(contenido, d / nombre, config.MAX_SUBIDA_MB)
+    if "telemetria.csv" in archivos:
+        try:
+            leer_filas(d / "telemetria.csv")
+        except Exception as e:
+            raise HTTPException(422, f"telemetria.csv inválida: {e}")
+    (d / "resumen.json").write_bytes(bruto)          # al final: marca la sesión como completa
+    return sesion
+
+
+def _resultado_mision(mision, d, sesiones, tipo_ruta, forzar=False):
+    try:
+        encolados = trabajos.encolar_mision(mision, tipo_ruta, forzar=forzar)
+    except Exception as e:
+        raise HTTPException(422, f"No se pudo leer la misión: {type(e).__name__}: {e}")
+    return {"mision": mision, "sesiones_recibidas": sesiones, "vuelos_encolados": encolados,
+            "urls": {"mision": f"/api/misiones/{mision}"}}
+
+
+@app.post("/api/misiones/{mision}/sesiones", status_code=202, dependencies=[Depends(autorizar)])
+def subir_sesion(mision: str, archivos: list[UploadFile] = File(..., description=(
+        "Archivos de UNA carpeta de sesión: resumen.json, telemetria.csv y sus videos")),
+        tipo_ruta: str | None = Form(None)):
+    """Sube una carpeta tierra_*/vuelo_* (los archivos tal cual, con su nombre original)."""
+    d = _dir_mision(mision)
+    tr = _tipo_ruta_mision(d, tipo_ruta)
+    sesion = _guardar_sesion(d, {Path(a.filename or "").name: a for a in archivos})
+    return _resultado_mision(mision, d, [sesion], tr)
+
+
+@app.post("/api/misiones/{mision}/zip", status_code=202, dependencies=[Depends(autorizar)])
+def subir_mision_zip(mision: str, archivo: UploadFile = File(..., description=(
+        "ZIP con las carpetas de sesión (tierra_*/vuelo_*) de la misión")),
+        tipo_ruta: str | None = Form(None)):
+    d = _dir_mision(mision)
+    tr = _tipo_ruta_mision(d, tipo_ruta)
+    with tempfile.TemporaryDirectory() as tmp:
+        ruta_zip = Path(tmp) / "m.zip"
+        _guardar(archivo, ruta_zip, config.MAX_SUBIDA_MB)
+        try:
+            zf = zipfile.ZipFile(ruta_zip)
+        except zipfile.BadZipFile:
+            raise HTTPException(422, "El archivo no es un ZIP válido")
+        grupos: dict[str, dict[str, bytes]] = {}
+        for info in zf.infolist():
+            partes = [x for x in Path(info.filename).parts if x not in ("", ".")]
+            if info.is_dir() or len(partes) < 2 or partes[-1].startswith("."):
+                continue
+            grupos.setdefault(partes[-2], {})[partes[-1]] = zf.read(info)   # <sesion>/<archivo>
+        if not grupos:
+            raise HTTPException(422, "El ZIP no contiene carpetas de sesión")
+        sesiones = [_guardar_sesion(d, g) for g in grupos.values() if "resumen.json" in g]
+    return _resultado_mision(mision, d, sesiones, tr)
+
+
+@app.post("/api/misiones/{mision}/procesar", status_code=202, dependencies=[Depends(autorizar)])
+def procesar_mision(mision: str, forzar: bool = False):
+    d = _dir_mision(mision)
+    if not d.exists():
+        raise HTTPException(404, "Misión no encontrada")
+    return _resultado_mision(mision, d, [], _tipo_ruta_mision(d, None), forzar=forzar)
+
+
+@app.get("/api/misiones", dependencies=[Depends(autorizar)])
+def listar_misiones():
+    if not config.DIR_MISIONES.exists():
+        return []
+    return sorted(x.name for x in config.DIR_MISIONES.iterdir() if x.is_dir())
+
+
+@app.get("/api/misiones/{mision}", dependencies=[Depends(autorizar)])
+def estado_mision(mision: str):
+    d = _dir_mision(mision)
+    if not d.exists():
+        raise HTTPException(404, "Misión no encontrada")
+    from src.mision import cargar_mision
+    vuelos = []
+    for s in cargar_mision(d):
+        if not s["es_vuelo"]:
+            continue
+        jid = trabajos.id_mision(mision, s["id"])
+        est = trabajos.leer_estado(jid) or {"estado": "sin_video"}
+        vuelos.append({"vuelo": s["id"], "estado": est["estado"], "progreso": est.get("progreso"),
+                       "mensaje": est.get("mensaje"), "error": est.get("error"),
+                       "urls": _urls(jid) if est["estado"] != "sin_video" else None})
+    return {"mision": mision, "tipo_ruta": _tipo_ruta_mision(d, None), "vuelos": vuelos}
 
 
 # ------------------------------------------------------------------ páginas web

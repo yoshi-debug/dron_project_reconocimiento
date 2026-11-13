@@ -1,0 +1,12 @@
+{
+  "flight_id": "vuelo_20261112_135628",
+  "drone_model": "MAVIC_AIR",
+  "started_at_ms": 1794509788785,
+  "last_seen_ms": 1794509968388,
+  "samples": 297,
+  "events": 11,
+  "ended": true,
+  "videos": [],
+  "mp4_version": 3,
+  "errors": []
+}
